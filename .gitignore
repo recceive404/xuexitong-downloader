@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+cookies.json
+.env
+.venv/
+venv/
+courses/
+chroma_db/
+.claude/checkpoints/
+*.egg-info/
+dist/
+.pytest_cache/
+debug_*.png
+diag_*.png
+diagnose.py
