@@ -82,26 +82,19 @@ def login():
         # 打开学习通登录页
         login_url = "https://passport2.chaoxing.com/login"
         print(f"🌐 打开登录页：{login_url}")
-        print("📱 请在浏览器中扫码登录（或输入账号密码）...\n")
+        print("📱 请在浏览器中扫码登录...")
+        print()
         page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
 
-        # 等待用户完成登录：检测 URL 跳转到个人空间或出现用户名
-        print("⏳ 等待登录完成（检测页面跳转）...")
-        try:
-            # 等待页面 URL 变化到非登录页，最多等 5 分钟
-            page.wait_for_url(
-                lambda url: "passport" not in url and "login" not in url,
-                timeout=300_000  # 5 分钟超时，够你扫码
-            )
-            print("✅ 检测到登录成功")
+        # 等待用户手动登录 — 不自动检测，让用户自己确认
+        print("━" * 50)
+        print("🔐 浏览器窗口已打开，请扫码登录")
+        print("   登录成功后，回到这个窗口按 回车 继续")
+        print("━" * 50)
+        input()
 
-            # 等一下确保 cookie 完全写入
-            time.sleep(2)
-
-        except Exception:
-            print("⚠️ 登录检测超时，尝试直接读取 cookie...")
-            # 可能已经登录了但 URL 没变，直接取 cookie 试试
-            time.sleep(1)
+        # 等一下确保 cookie 完全写入
+        time.sleep(1)
 
         # 获取所有 cookie
         cookies = context.cookies()
