@@ -14,6 +14,13 @@ import sys
 import os
 from pathlib import Path
 
+# ── 加载 .env 配置 ──
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except Exception:
+    pass
+
 # 修复 Windows GBK 编码问题
 if sys.platform == "win32":
     try:
@@ -28,6 +35,28 @@ from auth import login, load_cookies
 from crawler import list_courses, list_coursewares
 from downloader import download_coursewares
 from rag_engine import RAGEngine
+
+
+def _check_rag_ready() -> bool:
+    """检查 RAG 功能是否已配置（有 API key）"""
+    api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    if api_key and api_key not in ("你的DeepSeek_API_Key", ""):
+        return True
+    return False
+
+
+def _rag_config_hint():
+    """RAG 未配置时的提示信息"""
+    print("⚠️  未配置 DeepSeek API Key，RAG 问答功能不可用。")
+    print()
+    print("   如需使用 AI 问答，请：")
+    print("   1. 注册 DeepSeek：https://platform.deepseek.com")
+    print("   2. 获取 API Key")
+    print("   3. 复制 .env.example 为 .env，填入你的 API Key")
+    print("      cp .env.example .env")
+    print("      notepad .env")
+    print()
+    print("   如果只需要下载课件，可以忽略此提示。")
 
 
 def cmd_login():
@@ -91,6 +120,9 @@ def cmd_download(course_name: str):
 
 def cmd_build_rag():
     """构建/更新 RAG 知识库"""
+    if not _check_rag_ready():
+        _rag_config_hint()
+        return
     engine = RAGEngine()
     engine.build_or_update()
     engine.persist()
@@ -99,6 +131,9 @@ def cmd_build_rag():
 
 def cmd_ask(question: str | None = None):
     """问答模式"""
+    if not _check_rag_ready():
+        _rag_config_hint()
+        return
     engine = RAGEngine()
     engine.load()
 

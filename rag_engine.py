@@ -310,13 +310,20 @@ class RAGEngine:
         return answer
 
     def _get_api_config(self):
-        """获取 API 配置（环境变量 → ~/.claude/settings.json）"""
+        """获取 API 配置（.env 文件 → 环境变量 → ~/.claude/settings.json）"""
+        # 1. 优先从 .env 文件加载
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(Path(__file__).parent / ".env")
+        except Exception:
+            pass
+
         api_url = os.environ.get("ANTHROPIC_BASE_URL")
         api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN")
         model = os.environ.get("ANTHROPIC_MODEL")
 
+        # 2. 兜底：从 Claude Code 配置读取
         if not api_key:
-            # 尝试从 Claude Code 配置读取
             settings_path = Path.home() / ".claude" / "settings.json"
             if settings_path.exists():
                 try:
