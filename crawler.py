@@ -243,17 +243,103 @@ def list_coursewares(cookies: list[dict], course: dict) -> list[dict]:
         page.screenshot(path=str(debug_dir / "debug_ziliao.png"))
 
         if zl_frame:
-            # 在资料 iframe 中提取文件下载链接
+            # 1. 提取根目录文件
             zl_files = _extract_files_from_ziliao(zl_frame, seen_urls)
+            print(f"   根目录找到 {len(zl_files)} 个文件")
+
+            # 2. 获取文件夹列表（去重，通过 toOpen(..., 'afolder', dataId, ...)）
+            folder_ids = zl_frame.evaluate(r"""
+                () => {
+                    const seen = new Set();
+                    const r = [];
+                    document.querySelectorAll('[onclick*="toOpen"][onclick*="afolder"]').forEach(el => {
+                        const oc = el.getAttribute('onclick') || '';
+                        const m = oc.match(/toOpen\s*\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*(\d+)/);
+                        if (m) {
+                            const name = decodeURIComponent(m[1]);
+                            const dataId = m[3];
+                            if (!seen.has(dataId)) {
+                                seen.add(dataId);
+                                r.push({name: name, dataId: dataId});
+                            }
+                        }
+                    });
+                    return r;
+                }
+            """)
+            print(f"   找到 {len(folder_ids)} 个文件夹: {[f['name'] for f in folder_ids]}")
+
+            # 3. 依次进入每个文件夹，提取文件
+            for folder in folder_ids:
+                fname = folder["name"]
+                fid = folder["dataId"]
+                print(f"    进入文件夹: {fname}...")
+
+                # 为确保 DOM 干净，重新点击"资料"回到根目录再操作
+                # （breadcrumb 返回后 DOM 可能不完整）
+                if zl_files:  # 非第一个文件夹时，重新加载资料页
+                    page.goto(course_url, wait_until="networkidle", timeout=15000)
+                    time.sleep(3)
+                    _click_visible_text(page, "资料")
+                    time.sleep(4)
+                    # 重新获取 iframe
+                    zl_frame = None
+                    for f in page.query_selector_all("iframe"):
+                        if "frame_content-zl" in ((f.get_attribute("id") or "") + (f.get_attribute("name") or "")):
+                            zl_frame = f.content_frame()
+                            if zl_frame:
+                                break
+                    if not zl_frame:
+                        print("      [WARN] 无法重新获取 iframe，跳过")
+                        continue
+
+                # 点击文件夹 — 多策略尝试
+                clicked = False
+                clicked = zl_frame.evaluate(f"""
+                    () => {{
+                        const els = document.querySelectorAll('dt[onclick*="{fid}"]');
+                        if (els.length) {{ els[0].click(); return true; }}
+                        const lis = document.querySelectorAll('li[onclick*="{fid}"]');
+                        if (lis.length) {{ lis[0].click(); return true; }}
+                        return false;
+                    }}
+                """)
+                if not clicked:
+                    # 直接 eval onclick 中的 toOpen 调用
+                    clicked = zl_frame.evaluate(f"""
+                        () => {{
+                            const els = document.querySelectorAll('[onclick*="toOpen"][onclick*="afolder"]');
+                            for (const el of els) {{
+                                const oc = el.getAttribute('onclick') || '';
+                                if (oc.includes('{fid}')) {{
+                                    eval(oc); return true;
+                                }}
+                            }}
+                            return false;
+                        }}
+                    """)
+                if not clicked:
+                    print(f"      [WARN] 所有点击策略均失败，跳过")
+                    continue
+                time.sleep(4)
+
+                # 提取文件夹内的文件
+                inner_files = _extract_files_from_ziliao(zl_frame, seen_urls)
+                for f in inner_files:
+                    f["name"] = f"{fname}/{f['name']}"
+                zl_files.extend(inner_files)
+                print(f"      {len(inner_files)} 个文件")
+
+            all_files.extend(zl_files)
+            print(f"   资料区共找到 {len(zl_files)} 个文件（含子文件夹）")
+            for zf in zl_files:
+                print(f"     -> {zf['name']} ({zf.get('type','?')})")
         else:
-            # 兜底：直接从主页面提取（可能资料没有用 iframe）
+            # 兜底：直接从主页面提取
             print("   [WARN] 未找到资料 iframe，从主页面提取")
             zl_files = _extract_files_from_ziliao(page, seen_urls)
-
-        all_files.extend(zl_files)
-        print(f"   资料区找到 {len(zl_files)} 个文件")
-        for zf in zl_files:
-            print(f"     -> {zf['name']} ({zf.get('type','?')})")
+            all_files.extend(zl_files)
+            print(f"   资料区找到 {len(zl_files)} 个文件")
 
         browser.close()
 
