@@ -69,10 +69,10 @@ def cmd_wizard():
 
     # ── 第1步：登录 ──
     print("━━━ 第1步：登录学习通 ━━━")
+    cookie_file = Path(__file__).parent / "cookies.json"
     cookies = load_cookies()
-    if cookies:
-        print("✅ 已登录，跳过扫码")
-    else:
+
+    if not cookies:
         print("🔐 浏览器将弹出，请用学习通 APP 扫码...")
         login()
         cookies = load_cookies()
@@ -80,14 +80,32 @@ def cmd_wizard():
             print("❌ 登录失败，请重试")
             return
         print("✅ 登录成功！")
+    else:
+        print("✅ 已有登录记录")
 
     # ── 第2步：选课程 ──
     print()
     print("━━━ 第2步：选择课程 ━━━")
     courses = list_courses(cookies)
     if not courses:
-        print("⚠️ 未找到课程，请确认账号已选课")
-        return
+        print("⚠️ 未找到课程")
+        print("   Cookie 可能过期了，要不要重新登录？")
+        relogin = input("   重新登录？(y/n，默认 y): ").strip().lower()
+        if relogin != "n":
+            if cookie_file.exists():
+                cookie_file.unlink()
+            print("🔐 浏览器将弹出，请扫码...")
+            login()
+            cookies = load_cookies()
+            if not cookies:
+                print("❌ 登录失败")
+                return
+            courses = list_courses(cookies)
+            if not courses:
+                print("⚠️ 仍然未找到课程，请确认账号已选课")
+                return
+        else:
+            return
 
     print(f"📚 你的课程（共 {len(courses)} 门）：")
     for i, c in enumerate(courses, 1):
