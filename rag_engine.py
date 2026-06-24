@@ -107,31 +107,52 @@ class RAGEngine:
         return self._generate_answer(question, context)
 
     def _search(self, question: str) -> list[tuple[str, int]]:
-        """关键词匹配搜索，返回 [(文件名, 匹配分数), ...]"""
-        # 提取关键词：连续的中文字或英文词
-        keywords = []
-        # 中文词：Unicode 范围 一-鿿，连续 2 字以上
-        cn_words = re.findall(r'[一-鿿]{2,}', question)
-        keywords.extend(cn_words)
-        # 英文/数字词：连续 3 字符以上
-        en_words = re.findall(r'[a-zA-Z0-9]{3,}', question)
-        keywords.extend(en_words)
-        if not keywords:
-            # 退化为单字搜索
-            keywords = [question]
+        """关键词匹配搜索，返回 [(文件名, 匹配分数), ...]
 
+        中文用 2-4 字滑动窗口切词（n-gram），英文用空格分词。
+        这样"番茄大棚栽培"会被切成 番茄/茄大/大棚/棚栽/栽培 等，
+        每个片段都能独立匹配，不需要分词库。
+        """
+        keywords = []
+
+        # 中文 n-gram：2字、3字、4字滑动窗口
+        cn_chars = ''.join(c for c in question if '一' <= c <= '鿿')
+        for n in (4, 3, 2):
+            for i in range(len(cn_chars) - n + 1):
+                keywords.append(cn_chars[i:i+n])
+
+        # 英文/数字分词
+        en_part = re.sub(r'[一-鿿]+', ' ', question)
+        en_words = re.findall(r'[a-zA-Z0-9]{2,}', en_part)
+        keywords.extend(en_words)
+
+        # 去重+优先级：长词权重高
+        seen = set()
+        unique_kw = []
+        for kw in keywords:
+            if kw not in seen:
+                seen.add(kw)
+                unique_kw.append(kw)
+
+        if not unique_kw:
+            unique_kw = [question]
+
+        # 搜索评分
         scored = []
         for filename, text in self.documents.items():
             score = 0
             text_lower = text.lower()
-            for kw in keywords:
-                # 完全匹配 +3，部分匹配 +1
-                count = text_lower.count(kw.lower())
+            fl_lower = filename.lower()
+            for kw in unique_kw:
+                kw_lower = kw.lower()
+                count = text_lower.count(kw_lower)
                 if count > 0:
-                    score += 3 + count  # 基础分 + 出现次数
-                # 文件名匹配加倍
-                if kw.lower() in filename.lower():
-                    score += 10
+                    # 长词匹配权重更高
+                    weight = len(kw) * len(kw)
+                    score += weight + count
+                # 文件名匹配额外加分
+                if kw_lower in fl_lower:
+                    score += 15
             if score > 0:
                 scored.append((filename, score))
 
@@ -139,21 +160,25 @@ class RAGEngine:
         return scored
 
     def _extract_relevant(self, text: str, question: str, max_len: int) -> str:
-        """从文本中提取与问题最相关的片段"""
+        """从文本中提取与问题最相关的片段（用 n-gram 定位）"""
         if len(text) <= max_len:
             return text
 
-        keywords = re.findall(r'[一-鿿]{2,}|[a-zA-Z]{3,}', question)
-        if not keywords:
-            return text[:max_len]
-
-        # 找到第一个关键词匹配位置，取前后文
+        # 用 2-gram 找最佳匹配位置
+        cn_chars = ''.join(c for c in question if '一' <= c <= '鿿')
         best_pos = 0
-        for kw in keywords:
-            pos = text.lower().find(kw.lower())
-            if pos >= 0:
-                best_pos = pos
-                break
+        best_score = 0
+        for n in (3, 2):
+            for i in range(len(cn_chars) - n + 1):
+                kw = cn_chars[i:i+n]
+                pos = text.find(kw)
+                if pos >= 0:
+                    # 统计出现次数作为分数
+                    count = text.count(kw)
+                    score = count * n
+                    if score > best_score:
+                        best_score = score
+                        best_pos = pos
 
         start = max(0, best_pos - max_len // 4)
         end = min(len(text), start + max_len)
@@ -247,7 +272,11 @@ class RAGEngine:
             return f"[API 异常：{e}]\n\n课件片段：\n{context[:2000]}"
 
     def _parse_response(self, raw: str) -> str:
-        """解析 DeepSeek API 返回（兼容多种格式）"""
+        """解析 DeepSeek API 返回（兼容多种格式）
+
+        DeepSeek V4 返回格式：[{type:'thinking',...}, {type:'text',...}]
+        需要跳过 thinking 块，提取 text 块。
+        """
         # 尝试 JSON
         try:
             data = json.loads(raw)
@@ -258,11 +287,18 @@ class RAGEngine:
             except Exception:
                 return raw[:2000]
 
-        # DeepSeek 列表格式：[{type:'text', text:'...'}, ...]
+        # DeepSeek 列表格式：[{type:'thinking',...}, {type:'text',...}]
         if isinstance(data, list):
+            # 优先找 text 块，跳过 thinking
             for item in data:
                 if isinstance(item, dict) and item.get("type") == "text":
                     return item.get("text", "")
+            # 没有 text 块，返回最后一个 thinking 摘要
+            for item in reversed(data):
+                if isinstance(item, dict) and item.get("type") == "thinking":
+                    thinking = item.get("thinking", "")
+                    if thinking:
+                        return f"[思考过程]\n{thinking[:500]}"
             return str(data)[:500]
 
         # OpenAI 格式
@@ -272,6 +308,9 @@ class RAGEngine:
             # Anthropic 格式
             content = data.get("content", "")
             if isinstance(content, list) and content:
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        return item.get("text", "")
                 return content[0].get("text", str(content))
             if isinstance(content, str):
                 return content
