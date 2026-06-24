@@ -60,6 +60,12 @@ def download_coursewares(cookies: list[dict], course_name: str, coursewares: lis
             failed += 1
             continue
 
+        # 视频/音频文件跳过（太大了）
+        if cw_type in ("video", "audio"):
+            print(f"    ⏭️ 视频/音频，跳过")
+            skipped += 1
+            continue
+
         # 文件类型 → 扩展名映射
         type_ext = {
             "pdf": ".pdf", "ppt": ".pptx", "doc": ".doc", "docx": ".docx",
