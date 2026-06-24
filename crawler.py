@@ -206,12 +206,54 @@ def list_coursewares(cookies: list[dict], course: dict) -> list[dict]:
         page.goto(course_url, wait_until="networkidle", timeout=15000)
         time.sleep(3)
         _click_visible_text(page, "资料")
-        time.sleep(3)
+        time.sleep(4)
+
+        # 尝试找到资料 iframe
+        # 学习通资料 iframe 特征：id="frame_content-zl"，src 含 "coursedata/stu-datalist"
+        zl_frame = None
+        for f in page.query_selector_all("iframe"):
+            src = f.get_attribute("src") or ""
+            fid = f.get_attribute("id") or ""
+            fname = f.get_attribute("name") or ""
+            combined = (src + fid + fname).lower()
+            # 优先精确匹配已知 ID，其次匹配关键词
+            if "frame_content-zl" in combined or \
+               any(kw in combined for kw in ["coursedata", "datalist", "work", "document", "attachment", "resource"]):
+                try:
+                    zl_frame = f.content_frame()
+                    if zl_frame:
+                        print(f"   [OK] 找到资料 iframe: id={fid} name={fname} src={src[:80]}...")
+                        break
+                except:
+                    pass
+        # 如果没匹配到特定 iframe，尝试取第一个非章节的 iframe
+        if not zl_frame:
+            for f in page.query_selector_all("iframe"):
+                src = f.get_attribute("src") or ""
+                fid = (f.get_attribute("id") or "") + (f.get_attribute("name") or "")
+                if "frame_content-zj" not in fid and "knowledge/card" not in src:
+                    try:
+                        zl_frame = f.content_frame()
+                        if zl_frame:
+                            print(f"   [OK] 使用候选 iframe: src={src[:80]}...")
+                            break
+                    except:
+                        pass
+
         page.screenshot(path=str(debug_dir / "debug_ziliao.png"))
 
-        zl_files = _extract_images_from_page(page, "资料", seen_urls)
+        if zl_frame:
+            # 在资料 iframe 中提取文件下载链接
+            zl_files = _extract_files_from_ziliao(zl_frame, seen_urls)
+        else:
+            # 兜底：直接从主页面提取（可能资料没有用 iframe）
+            print("   [WARN] 未找到资料 iframe，从主页面提取")
+            zl_files = _extract_files_from_ziliao(page, seen_urls)
+
         all_files.extend(zl_files)
         print(f"   资料区找到 {len(zl_files)} 个文件")
+        for zf in zl_files:
+            print(f"     -> {zf['name']} ({zf.get('type','?')})")
 
         browser.close()
 
@@ -433,4 +475,160 @@ def _extract_images_from_page(page, label: str, seen_urls: set) -> list[dict]:
             seen_urls.add(img_url)
             idx = len(results) + 1
             results.append({"name": f"{label}_{idx:02d}", "url": img_url, "type": "image"})
+    return results
+
+
+def _extract_files_from_ziliao(target, seen_urls: set) -> list[dict]:
+    """从资料 iframe/页面中提取可下载文件链接
+
+    学习通资料区 DOM 结构（iframe#frame_content-zl）：
+      - 文件行：<DT>文件名.doc</DT> + <A href="/coursedata/downloadData?dataId=...">下载</A>
+      - 文件夹行：<DT>文件夹名</DT> + onclick=toOpen(...)（不含下载链接）
+      - onclick 中也包含 toOpen('文件名','doc',dataId,...) 含文件类型信息
+    """
+    results = []
+    file_ext_map = {
+        ".pdf": "pdf", ".doc": "doc", ".docx": "doc",
+        ".ppt": "ppt", ".pptx": "ppt", ".xls": "xls", ".xlsx": "xls",
+        ".mp4": "video", ".mp3": "audio", ".flv": "video",
+        ".zip": "archive", ".rar": "archive",
+        ".txt": "text", ".jpg": "image", ".png": "image",
+    }
+
+    # ── 方法1：匹配 downloadData 链接 + 文件名 ──
+    # 找出所有 /coursedata/downloadData 链接，从同行/附近 DT 提取文件名
+    raw_entries = target.evaluate(r"""
+        () => {
+            const r = [];
+            // 找所有 downloadData 链接
+            document.querySelectorAll('a[href*="downloadData"]').forEach(a => {
+                const href = a.href || '';
+                if (!href.includes('downloadData')) return;
+                // 在同级或父级找 DT 元素中的文件名
+                let row = a.closest('li, tr, .dataBody, dl');
+                if (!row) row = a.parentElement;
+                let name = '';
+                if (row) {
+                    const dt = row.querySelector('dt, .dataBody_file, [class*="file"]');
+                    if (dt) name = (dt.innerText || '').trim();
+                }
+                // 如果没找到，尝试从前面兄弟元素找
+                if (!name && row) {
+                    const prev = row.previousElementSibling;
+                    if (prev) name = (prev.innerText || '').trim().substring(0, 100);
+                }
+                r.push({url: href, name: name});
+            });
+            return r;
+        }
+    """)
+
+    for entry in raw_entries:
+        url = entry.get("url", "")
+        name = entry.get("name", "")
+        if not url or url in seen_urls or "javascript:" in url:
+            continue
+        seen_urls.add(url)
+
+        # 从文件名推断类型
+        ftype = "html"
+        name_lower = name.lower()
+        for ext, t in file_ext_map.items():
+            if ext in name_lower or ext in url.lower():
+                ftype = t
+                break
+        # downloadData 通常是 office 文件
+        if ftype == "html":
+            ftype = "doc"
+
+        if not name:
+            name = f"资料文件_{len(results)+1:02d}"
+        results.append({"name": name, "url": url, "type": ftype})
+
+    # ── 方法2：从 toOpen() 的 onclick 提取文件信息 ──
+    # toOpen('文件名.doc', 'doc', dataId, ...) — 参数2是文件类型
+    onclick_entries = target.evaluate(r"""
+        () => {
+            const r = [];
+            document.querySelectorAll('[onclick*="toOpen"]').forEach(el => {
+                const oc = el.getAttribute('onclick') || '';
+                const m = oc.match(/toOpen\s*\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*(\d+)/);
+                if (m) {
+                    const fname = decodeURIComponent(m[1]);
+                    const ftype = m[2];  // 'doc', 'docx', 'pdf', 'afolder' etc
+                    const dataId = m[3];
+                    if (ftype && ftype !== 'afolder') {
+                        r.push({name: fname, type: ftype, dataId: dataId});
+                    }
+                }
+            });
+            return r;
+        }
+    """)
+
+    # 用 onclick 中的信息补充/修正方法1的结果
+    for entry in onclick_entries:
+        ftype = entry.get("type", "")
+        name = entry.get("name", "")
+        data_id = entry.get("dataId", "")
+
+        # 映射类型
+        mapped_type = ftype if ftype in ("pdf", "ppt", "doc", "docx") else "doc"
+        if ftype in ("mp4", "flv"):
+            mapped_type = "video"
+        elif ftype in ("mp3",):
+            mapped_type = "audio"
+
+        # 检查是否已在结果中
+        already = False
+        for r in results:
+            if data_id and data_id in r.get("url", ""):
+                # 用 onclick 中的更准确信息修正
+                if not r["name"] or len(name) > len(r["name"]):
+                    r["name"] = name
+                r["type"] = mapped_type
+                already = True
+                break
+        if already:
+            continue
+
+        # 构造下载 URL
+        # downloadData 链接格式：/coursedata/downloadData?dataId=X&classId=...&courseId=...&ut=s
+        # 如果方法1没找到，说明这个文件可能藏在文件夹里，先跳过
+        # （进入文件夹需要再点击，这里先不处理）
+
+    # ── 方法3：兜底 — 抓所有带 /upload/ 或 /doc/ 路径的链接 ──
+    extra_links = target.evaluate(r"""
+        () => {
+            const r = [];
+            document.querySelectorAll('a[href]').forEach(a => {
+                const href = a.href || '';
+                if (href.startsWith('http') && !href.includes('javascript:')) {
+                    const lower = href.toLowerCase();
+                    if (lower.includes('/upload/') || lower.includes('/doc/') || lower.includes('download')) {
+                        const text = (a.innerText || '').trim().substring(0, 80);
+                        if (!r.some(x => x.url === href)) {
+                            r.push({url: href, name: text});
+                        }
+                    }
+                }
+            });
+            return r;
+        }
+    """)
+    for entry in extra_links:
+        url = entry.get("url", "")
+        name = entry.get("name", "")
+        if not url or url in seen_urls or "javascript:" in url:
+            continue
+        seen_urls.add(url)
+        ftype = "html"
+        for ext, t in file_ext_map.items():
+            if ext in url.lower() or ext in name.lower():
+                ftype = t
+                break
+        if not name:
+            name = f"资料文件_{len(results)+1:02d}"
+        results.append({"name": name, "url": url, "type": ftype})
+
     return results

@@ -60,26 +60,38 @@ def download_coursewares(cookies: list[dict], course_name: str, coursewares: lis
             failed += 1
             continue
 
+        # 文件类型 → 扩展名映射
+        type_ext = {
+            "pdf": ".pdf", "ppt": ".pptx", "doc": ".doc", "docx": ".docx",
+            "xls": ".xls", "xlsx": ".xlsx",
+            "video": ".mp4", "audio": ".mp3", "archive": ".zip", "text": ".txt",
+            "image": ".png",
+        }
+        # 如果文件名已包含正确的扩展名，去掉它以避免重复
+        name_lower = name.lower()
+        for ext in [".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".xls",
+                     ".mp4", ".mp3", ".flv", ".zip", ".rar", ".txt", ".png", ".jpg"]:
+            if name_lower.endswith(ext) and len(name) > len(ext):
+                name = name[:-len(ext)]
+                break
+        # 直接用 URL 推断扩展名（处理 type 为 html 但实际是文件的链接）
+        actual_ext = ""
+        url_lower = url.lower()
+        for ext in [".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".xls",
+                     ".mp4", ".mp3", ".flv", ".zip", ".rar", ".txt", ".png", ".jpg", ".jpeg"]:
+            if ext in url_lower:
+                actual_ext = ext
+                break
+        # 用 URL 扩展名修正类型
+        if actual_ext and cw_type in ("html", "", None):
+            mapped = {".pdf":"pdf",".pptx":"ppt",".ppt":"ppt",".doc":"doc",".docx":"doc",
+                      ".xls":"xls",".xlsx":"xls",".mp4":"video",".mp3":"audio",
+                      ".flv":"video",".zip":"archive",".rar":"archive",".txt":"text",
+                      ".png":"image",".jpg":"image",".jpeg":"image"}
+            cw_type = mapped.get(actual_ext, cw_type)
+
         try:
-            if cw_type == "pdf":
-                fpath = course_dir / f"{name}.pdf"
-                if fpath.exists():
-                    print(f"    ⏭️ 已存在，跳过")
-                    skipped += 1
-                else:
-                    _download_file(session, url, fpath)
-                    success += 1
-
-            elif cw_type == "ppt":
-                fpath = course_dir / f"{name}.pptx"
-                if fpath.exists():
-                    print(f"    ⏭️ 已存在，跳过")
-                    skipped += 1
-                else:
-                    _download_file(session, url, fpath)
-                    success += 1
-
-            elif cw_type == "image":
+            if cw_type == "image":
                 # 先下载为临时PNG，稍后合成PDF
                 tmp_path = course_dir / f"_tmp_{name}.png"
                 if tmp_path.exists():
@@ -91,7 +103,18 @@ def download_coursewares(cookies: list[dict], course_name: str, coursewares: lis
                     image_groups[chapter_name].append((tmp_path, url))
                     success += 1
 
+            elif cw_type in type_ext:
+                ext = type_ext[cw_type]
+                fpath = course_dir / f"{name}{ext}"
+                if fpath.exists():
+                    print(f"    ⏭️ 已存在，跳过")
+                    skipped += 1
+                else:
+                    _download_file(session, url, fpath)
+                    success += 1
+
             else:
+                # 真正的 HTML 文本类课件
                 fpath = course_dir / f"{name}.txt"
                 if fpath.exists():
                     print(f"    ⏭️ 已存在，跳过")
