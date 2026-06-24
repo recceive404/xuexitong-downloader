@@ -59,6 +59,130 @@ def _rag_config_hint():
     print("   如果只需要下载课件，可以忽略此提示。")
 
 
+def cmd_wizard():
+    """傻瓜式向导：登录 → 下载 → API → RAG → 问答，一条龙"""
+    print()
+    print("╔══════════════════════════════════════════╗")
+    print("║     🎓 学习通课件下载器 — 傻瓜向导       ║")
+    print("╚══════════════════════════════════════════╝")
+    print()
+
+    # ── 第1步：登录 ──
+    print("━━━ 第1步：登录学习通 ━━━")
+    cookies = load_cookies()
+    if cookies:
+        print("✅ 已登录，跳过扫码")
+    else:
+        print("🔐 浏览器将弹出，请用学习通 APP 扫码...")
+        login()
+        cookies = load_cookies()
+        if not cookies:
+            print("❌ 登录失败，请重试")
+            return
+        print("✅ 登录成功！")
+
+    # ── 第2步：选课程 ──
+    print()
+    print("━━━ 第2步：选择课程 ━━━")
+    courses = list_courses(cookies)
+    if not courses:
+        print("⚠️ 未找到课程，请确认账号已选课")
+        return
+
+    print(f"📚 你的课程（共 {len(courses)} 门）：")
+    for i, c in enumerate(courses, 1):
+        print(f"  [{i}] {c['name']}")
+
+    print()
+    while True:
+        choice = input("输入序号下载哪门课（输入 a 下载全部）:").strip()
+        if choice.lower() == "a":
+            targets = courses
+            break
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(courses):
+                targets = [courses[idx]]
+                break
+        except ValueError:
+            pass
+        print("输入不对，重新来")
+
+    # ── 第3步：下载 ──
+    for target in targets:
+        print()
+        print(f"━━━ 第3步：下载「{target['name']}」━━━")
+        coursewares = list_coursewares(cookies, target)
+        if not coursewares:
+            print("⚠️ 该课程暂无课件")
+            continue
+        print(f"📄 共 {len(coursewares)} 个课件，开始下载...")
+        download_coursewares(cookies, target["name"], coursewares)
+
+    # ── 第4步：AI 问答（可选）──
+    print()
+    print("━━━ 第4步：AI 问答（可选）━━━")
+    print("AI 可以帮你基于课件内容提问，比如「番茄栽培有哪些技术」")
+    want_ai = input("要开启 AI 问答吗？(y/n，默认 y): ").strip().lower()
+    if want_ai == "n":
+        print("👋 完成！课件已保存到 courses 文件夹")
+        return
+
+    # ── 第5步：设置 API Key ──
+    if not _check_rag_ready():
+        print()
+        print("需要 DeepSeek API Key 才能用 AI 问答")
+        print("📌 获取方式：platform.deepseek.com → 注册 → API Keys")
+        print()
+        apikey = input("粘贴你的 API Key（sk-开头，不需要就按回车跳过）:").strip()
+        if not apikey:
+            print("已跳过，课件已下载到 courses 文件夹")
+            return
+        # 写入 .env
+        env_path = Path(__file__).parent / ".env"
+        env_path.write_text(
+            f"ANTHROPIC_AUTH_TOKEN={apikey}\n"
+            f"ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic\n"
+            f"ANTHROPIC_MODEL=deepseek-v4-pro[1m]\n",
+            encoding="utf-8"
+        )
+        # 重新加载环境变量
+        os.environ["ANTHROPIC_AUTH_TOKEN"] = apikey
+        print("✅ API Key 已保存")
+
+    # ── 第6步：构建知识库 ──
+    print()
+    print("━━━ 第6步：消化课件到知识库 ━━━")
+    engine = RAGEngine()
+    engine.build_or_update()
+    engine.persist()
+
+    # ── 第7步：问答 ──
+    print()
+    print("━━━ 第7步：AI 问答 ━━━")
+    print("💬 输入问题，AI 基于课件回答（输入 /exit 退出）")
+    print()
+    engine.load()
+    while True:
+        try:
+            q = input("❓ 提问：").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n👋 再见")
+            break
+        if not q:
+            continue
+        if q.lower() == "/exit":
+            print("👋 再见！课件在 courses 文件夹里")
+            break
+        if q.lower() == "/courses":
+            for c in engine.list_courses():
+                print(f"   - {c}")
+            continue
+        print("⏳ 检索中...")
+        answer = engine.ask(q)
+        print(f"\n📝 {answer}\n")
+
+
 def cmd_login():
     """扫码登录，保存 cookie"""
     print("🔐 打开浏览器，请扫码登录学习通...")
@@ -216,6 +340,7 @@ def main():
     sub.add_parser("build-rag", help="将已下载课件消化到 RAG 知识库")
     sub_ask = sub.add_parser("ask", help="基于课件内容提问")
     sub_ask.add_argument("question", nargs="?", default=None, help="问题（不提供则进入交互模式）")
+    sub.add_parser("wizard", help="傻瓜式向导：登录→下载→AI问答 一条龙")
 
     args = parser.parse_args()
 
@@ -229,8 +354,11 @@ def main():
         cmd_build_rag()
     elif args.command == "ask":
         cmd_ask(args.question)
+    elif args.command == "wizard":
+        cmd_wizard()
     else:
-        parser.print_help()
+        # 默认启动向导
+        cmd_wizard()
 
 
 if __name__ == "__main__":
