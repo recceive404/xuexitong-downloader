@@ -171,11 +171,11 @@ class RAGEngine:
         if not ranked:
             return "未找到与问题相关的课件内容。"
 
-        # 2. 构建上下文（最多 8000 字）
+        # 2. 构建上下文
         context_parts = []
-        low_text_files = []  # 文本极少的文件（可能全是图/表格）
+        low_text_files = []
         total_len = 0
-        max_context = 8000
+        max_context = 60000  # 约 3 万 token，DeepSeek V4 有 100 万 token 上下文，绰绰有余
         for filename, score in ranked[:10]:
             text = self.documents[filename]
             snippet = self._extract_relevant(text, question, max(max_context - total_len, 1000))
