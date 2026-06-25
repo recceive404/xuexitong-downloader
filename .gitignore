@@ -1,15 +1,29 @@
+# Python
 __pycache__/
 *.pyc
-cookies.json
-.env
+*.pyo
 .venv/
 venv/
+
+# Secrets & Config
+.env
+cookies.json
+course_index.json
+
+# Claude Code (开发工具，非项目文件)
+.claude/
+
+# Downloaded courseware
 courses/
 chroma_db/
-.claude/checkpoints/
+
+# Debug & diagnostics
+debug_*.png
+diag_*.png
+diag_*.py
+diagnose.py
+
+# Build
 *.egg-info/
 dist/
 .pytest_cache/
-debug_*.png
-diag_*.png
-diagnose.py
