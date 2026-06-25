@@ -60,19 +60,19 @@ def _rag_config_hint():
 
 
 def cmd_wizard():
-    """傻瓜式向导：登录 → 下载 → API → RAG → 问答，一条龙"""
+    """傻瓜式向导：登录 → 主菜单（下载 / RAG / 问答 / 设置）"""
     print()
     print("╔══════════════════════════════════════════╗")
-    print("║     🎓 学习通课件下载器 — 傻瓜向导       ║")
+    print("║     🎓 学习通课件下载器                 ║")
     print("╚══════════════════════════════════════════╝")
     print()
 
-    # ── 第1步：登录 ──
-    print("━━━ 第1步：登录学习通 ━━━")
     cookie_file = Path(__file__).parent / "cookies.json"
     cookies = load_cookies()
 
-    if not cookies:
+    if cookies:
+        print("✅ 已有登录记录")
+    else:
         print("🔐 浏览器将弹出，请用学习通 APP 扫码...")
         login()
         cookies = load_cookies()
@@ -80,117 +80,151 @@ def cmd_wizard():
             print("❌ 登录失败，请重试")
             return
         print("✅ 登录成功！")
-    else:
-        print("✅ 已有登录记录")
 
-    # ── 第2步：选课程 ──
-    print()
-    print("━━━ 第2步：选择课程 ━━━")
-    courses = list_courses(cookies)
-    if not courses:
-        print("⚠️ 未找到课程")
-        print("   Cookie 可能过期了，要不要重新登录？")
-        relogin = input("   重新登录？(y/n，默认 y): ").strip().lower()
-        if relogin != "n":
+    # ── 主菜单 ──
+    while True:
+        print()
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("  [1] 下载课件")
+        print("  [2] 消化课件到知识库（AI 问答前必做）")
+        print("  [3] AI 问答")
+        print("  [4] 设置 API Key")
+        print("  [5] 重新登录")
+        print("  [0] 退出")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        choice = input("  选择: ").strip()
+
+        if choice == "1":
+            _wizard_download(cookie_file, cookies)
+        elif choice == "2":
+            _wizard_build_rag()
+        elif choice == "3":
+            _wizard_ask()
+        elif choice == "4":
+            _wizard_set_key()
+        elif choice == "5":
             if cookie_file.exists():
                 cookie_file.unlink()
-            print("🔐 浏览器将弹出，请扫码...")
             login()
             cookies = load_cookies()
             if not cookies:
                 print("❌ 登录失败")
                 return
-            courses = list_courses(cookies)
-            if not courses:
-                print("⚠️ 仍然未找到课程，请确认账号已选课")
-                return
+            print("✅ 重新登录成功！")
+        elif choice == "0":
+            print("👋 再见！")
+            break
         else:
+            print("输入不对，重新来")
+
+
+def _wizard_download(cookie_file, cookies):
+    """下载课件子流程"""
+    print()
+    print("━━━ 下载课件 ━━━")
+    courses = list_courses(cookies)
+    if not courses:
+        print("⚠️ 未找到课程")
+        relogin = input("Cookie 可能过期，重新登录？(y/n): ").strip().lower()
+        if relogin != "n":
+            if cookie_file.exists():
+                cookie_file.unlink()
+            login()
+            cookies = load_cookies()
+            if cookies:
+                courses = list_courses(cookies)
+        if not courses:
+            print("⚠️ 仍未找到课程")
             return
 
     print(f"📚 你的课程（共 {len(courses)} 门）：")
     for i, c in enumerate(courses, 1):
         print(f"  [{i}] {c['name']}")
+    print("  [0] 返回")
 
-    print()
-    while True:
-        choice = input("输入序号下载哪门课（输入 a 下载全部）:").strip()
-        if choice.lower() == "a":
-            targets = courses
-            break
+    choice = input("选课 (序号/a=全部/0=返回): ").strip()
+    if choice == "0" or choice == "":
+        return
+    if choice.lower() == "a":
+        targets = courses
+    else:
         try:
             idx = int(choice) - 1
             if 0 <= idx < len(courses):
                 targets = [courses[idx]]
-                break
+            else:
+                print("序号不对")
+                return
         except ValueError:
-            pass
-        print("输入不对，重新来")
+            print("输入不对")
+            return
 
-    # ── 第3步：下载 ──
     for target in targets:
-        print()
-        print(f"━━━ 第3步：下载「{target['name']}」━━━")
+        print(f"\n📥 下载「{target['name']}」...")
         coursewares = list_coursewares(cookies, target)
         if not coursewares:
             print("⚠️ 该课程暂无课件")
             continue
-        print(f"📄 共 {len(coursewares)} 个课件，开始下载...")
+        print(f"📄 共 {len(coursewares)} 个课件")
         download_coursewares(cookies, target["name"], coursewares)
 
-    # ── 第4步：AI 问答（可选）──
-    print()
-    print("━━━ 第4步：AI 问答（可选）━━━")
-    print("AI 可以帮你基于课件内容提问，比如「番茄栽培有哪些技术」")
-    want_ai = input("要开启 AI 问答吗？(y/n，默认 y): ").strip().lower()
-    if want_ai == "n":
-        print("👋 完成！课件已保存到 courses 文件夹")
-        return
 
-    # ── 第5步：设置 API Key ──
+def _wizard_build_rag():
+    """构建 RAG 知识库"""
+    print()
     if not _check_rag_ready():
-        print()
-        print("需要 DeepSeek API Key 才能用 AI 问答")
-        print("📌 获取方式：platform.deepseek.com → 注册 → API Keys")
-        print()
-        apikey = input("粘贴你的 API Key（sk-开头，不需要就按回车跳过）:").strip()
-        if not apikey:
-            print("已跳过，课件已下载到 courses 文件夹")
-            return
-        # 写入 .env
-        env_path = Path(__file__).parent / ".env"
-        env_path.write_text(
-            f"ANTHROPIC_AUTH_TOKEN={apikey}\n"
-            f"ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic\n"
-            f"ANTHROPIC_MODEL=deepseek-v4-pro[1m]\n",
-            encoding="utf-8"
-        )
-        # 重新加载环境变量
-        os.environ["ANTHROPIC_AUTH_TOKEN"] = apikey
-        print("✅ API Key 已保存")
-
-    # ── 第6步：构建知识库 ──
-    print()
-    print("━━━ 第6步：消化课件到知识库 ━━━")
+        print("⚠️ 未配置 API Key，先选 [4] 设置 API Key")
+        return
+    print("📦 消化课件中...")
     engine = RAGEngine()
     engine.build_or_update()
     engine.persist()
 
-    # ── 第7步：问答 ──
+
+def _wizard_set_key():
+    """设置 API Key"""
     print()
-    print("━━━ 第7步：AI 问答 ━━━")
-    print("💬 输入问题，AI 基于课件回答（输入 /exit 退出）")
+    print("━━━ 设置 API Key ━━━")
+    print("获取方式：platform.deepseek.com → 注册 → API Keys")
     print()
+    apikey = input("粘贴 API Key（sk-开头）: ").strip()
+    if not apikey:
+        print("已取消")
+        return
+    env_path = Path(__file__).parent / ".env"
+    env_path.write_text(
+        f"ANTHROPIC_AUTH_TOKEN={apikey}\n"
+        f"ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic\n"
+        f"ANTHROPIC_MODEL=deepseek-v4-pro[1m]\n",
+        encoding="utf-8"
+    )
+    os.environ["ANTHROPIC_AUTH_TOKEN"] = apikey
+    print("✅ API Key 已保存")
+
+
+def _wizard_ask():
+    """AI 问答子流程"""
+    print()
+    if not _check_rag_ready():
+        print("⚠️ 未配置 API Key，先选 [4] 设置 API Key")
+        return
+    engine = RAGEngine()
     engine.load()
+    if not engine.documents:
+        print("⚠️ 知识库为空，先选 [2] 消化课件")
+        return
+
+    print("💬 AI 问答（输入 /exit 退出，/courses 查看课程）")
+    print()
     while True:
         try:
             q = input("❓ 提问：").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n👋 再见")
+            print("\n👋 返回主菜单")
             break
         if not q:
             continue
         if q.lower() == "/exit":
-            print("👋 再见！课件在 courses 文件夹里")
             break
         if q.lower() == "/courses":
             for c in engine.list_courses():
