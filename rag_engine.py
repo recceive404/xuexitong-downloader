@@ -27,38 +27,122 @@ class RAGEngine:
     # ── 知识库构建 ─────────────────────────────────────
 
     def build_or_update(self):
-        """扫描 courses/ 下所有 txt 文件，建立文本索引"""
+        """扫描 courses/ 下所有可解析文件，建立文本索引
+
+        支持格式：.txt .html .pdf .pptx .docx
+        用法：把任意课件丢进 courses/ 下，运行 build-rag 即可
+        """
         if not COURSES_DIR.exists():
             print("[WARN] courses/ 目录不存在，请先下载课件")
             return
 
-        txt_files = sorted(COURSES_DIR.rglob("*.txt"))
-        if not txt_files:
-            print("[WARN] 未找到任何 txt 课件文件")
+        # 扫描所有支持的文件类型
+        all_files = []
+        for ext in ["*.txt", "*.html", "*.htm", "*.pdf", "*.pptx", "*.docx"]:
+            all_files.extend(COURSES_DIR.rglob(ext))
+
+        if not all_files:
+            print("[WARN] 未找到任何课件文件（支持 txt/html/pdf/pptx/docx）")
             return
 
-        print(f"[SCAN] 找到 {len(txt_files)} 个 txt 文件")
+        print(f"[SCAN] 找到 {len(all_files)} 个文件")
 
         new_docs = {}
-        for fp in txt_files:
+        for fp in sorted(all_files):
+            key = str(fp.relative_to(COURSES_DIR)).replace("\\", "/")
+            suffix = fp.suffix.lower()
+
             try:
-                text = fp.read_text(encoding="utf-8", errors="ignore")
-                if len(text.strip()) > 20:
-                    # 用相对路径作为 key
-                    key = str(fp.relative_to(COURSES_DIR)).replace("\\", "/")
+                if suffix in (".txt", ".html", ".htm"):
+                    text = fp.read_text(encoding="utf-8", errors="ignore")
+                elif suffix == ".pdf":
+                    text = self._parse_pdf(fp)
+                elif suffix == ".pptx":
+                    text = self._parse_pptx(fp)
+                elif suffix == ".docx":
+                    text = self._parse_docx(fp)
+                else:
+                    continue
+
+                if text and len(text.strip()) > 10:
                     new_docs[key] = text
+                    print(f"  [OK] {key} ({len(text):,} 字)")
+                else:
+                    print(f"  [LOW] {key} — 文本内容极少，可能以图片为主")
+                    # 仍然保存，但标记为低质量
+                    new_docs[key] = text or f"[此文件文本内容极少，建议查看原文件: {key}]"
+
             except Exception as e:
-                print(f"  [WARN] 读取失败 {fp.name}: {e}")
+                print(f"  [ERR] {key}: {e}")
+                new_docs[key] = f"[解析失败: {key}]"
 
         self.documents = new_docs
         self._initialized = True
 
-        # 保存索引到磁盘（JSON）
+        # 保存索引
         INDEX_FILE.write_text(
             json.dumps(self.documents, ensure_ascii=False), encoding="utf-8"
         )
         total_chars = sum(len(v) for v in self.documents.values())
+        low_count = sum(1 for v in self.documents.values() if len(v) < 200)
         print(f"[OK] 索引完成：{len(self.documents)} 个文件，共 {total_chars:,} 字")
+        if low_count:
+            print(f"     {low_count} 个文件文本较少，提问时可能无法深度回答")
+
+    def _parse_pdf(self, fp) -> str:
+        """PyMuPDF 提取 PDF 文字"""
+        try:
+            import fitz
+            doc = fitz.open(str(fp))
+            parts = []
+            for page in doc:
+                t = page.get_text()
+                if t:
+                    parts.append(t)
+            doc.close()
+            return "\n".join(parts)
+        except Exception as e:
+            return f"[PDF解析失败: {e}]"
+
+    def _parse_pptx(self, fp) -> str:
+        """python-pptx 提取 PPT 文字"""
+        try:
+            from pptx import Presentation
+            prs = Presentation(str(fp))
+            parts = []
+            for i, slide in enumerate(prs.slides, 1):
+                slide_texts = []
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        for para in shape.text_frame.paragraphs:
+                            t = para.text.strip()
+                            if t:
+                                slide_texts.append(t)
+                if slide_texts:
+                    parts.append(f"[幻灯片 {i}]\n" + "\n".join(slide_texts))
+            return "\n\n".join(parts)
+        except Exception as e:
+            return f"[PPT解析失败: {e}]"
+
+    def _parse_docx(self, fp) -> str:
+        """python-docx 提取 Word 文字"""
+        try:
+            from docx import Document
+            doc = Document(str(fp))
+            parts = []
+            for para in doc.paragraphs:
+                t = para.text.strip()
+                if t:
+                    parts.append(t)
+            # 也提取表格中的文字
+            for table in doc.tables:
+                for row in table.rows:
+                    row_texts = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                    if row_texts:
+                        parts.append(" | ".join(row_texts))
+            return "\n".join(parts)
+        except Exception as e:
+            return f"[DOCX解析失败: {e}]"
 
     def load(self):
         """加载已有索引"""
@@ -89,14 +173,17 @@ class RAGEngine:
 
         # 2. 构建上下文（最多 8000 字）
         context_parts = []
+        low_text_files = []  # 文本极少的文件（可能全是图/表格）
         total_len = 0
         max_context = 8000
         for filename, score in ranked[:10]:
             text = self.documents[filename]
-            # 提取包含关键词的段落
             snippet = self._extract_relevant(text, question, max(max_context - total_len, 1000))
             context_parts.append(f"【{filename}】\n{snippet}")
             total_len += len(snippet)
+            # 标记低文本文件
+            if len(text) < 200:
+                low_text_files.append(filename)
             if total_len >= max_context:
                 break
 
@@ -104,7 +191,16 @@ class RAGEngine:
         print(f"  [SEARCH] 匹配 {len(ranked)} 个文件，上下文 {total_len:,} 字")
 
         # 3. 调用 API
-        return self._generate_answer(question, context)
+        answer = self._generate_answer(question, context)
+
+        # 4. 如果匹配中包含低文本文件，追加提示
+        if low_text_files:
+            hint = "\n\n---\n📎 以下文件文本内容较少（可能包含图片/表格/思维导图），建议查看原文件：\n"
+            for f in low_text_files[:5]:
+                hint += f"  • courses/{f}\n"
+            answer += hint
+
+        return answer
 
     def _search(self, question: str) -> list[tuple[str, int]]:
         """关键词匹配搜索，返回 [(文件名, 匹配分数), ...]
